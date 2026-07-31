@@ -4,6 +4,9 @@ namespace Relod\SeoFixer\Service;
 use Bitrix\Main\Application;
 use Relod\SeoFixer\Model\ImportTable;
 
+/**
+ * Очистка служебных данных модуля. Контент сайта не затрагивается.
+ */
 class MaintenanceService
 {
     public function deleteImports(array $importIds, bool $deleteFiles = true): array
@@ -13,10 +16,7 @@ class MaintenanceService
             return ['imports' => 0, 'issues' => 0, 'changes' => 0, 'errors' => 0, 'files' => 0];
         }
 
-        $filesDeleted = 0;
-        if ($deleteFiles) {
-            $filesDeleted = $this->deletePhysicalFiles($ids);
-        }
+        $filesDeleted = $deleteFiles ? $this->deletePhysicalFiles($ids) : 0;
 
         $connection = Application::getConnection();
         $idSql = implode(',', $ids);
@@ -36,10 +36,14 @@ class MaintenanceService
         return $counts;
     }
 
-    public function clearIssues(int $importId = 0, array $issueIds = []): array
+    /**
+     * Удаляет карточки проблем: по списку ID, по загрузке или по сайту.
+     */
+    public function clearIssues(int $importId = 0, array $issueIds = [], string $siteId = ''): array
     {
         $connection = Application::getConnection();
-        $where = '';
+        $helper = $connection->getSqlHelper();
+
         if ($issueIds) {
             $ids = array_values(array_unique(array_filter(array_map('intval', $issueIds))));
             if (!$ids) {
@@ -47,14 +51,16 @@ class MaintenanceService
             }
             $where = 'ID IN (' . implode(',', $ids) . ')';
         } elseif ($importId > 0) {
-            $where = 'IMPORT_ID=' . (int)$importId;
+            $where = 'IMPORT_ID=' . $importId;
+        } elseif ($siteId !== '') {
+            $where = "SITE_ID='" . $helper->forSql($siteId) . "'";
         } else {
             $where = '1=1';
         }
 
-        $issueIdRows = $connection->query('SELECT ID FROM b_relod_seofixer_issue WHERE ' . $where);
+        $res = $connection->query('SELECT ID FROM b_relod_seofixer_issue WHERE ' . $where);
         $ids = [];
-        while ($row = $issueIdRows->fetch()) {
+        while ($row = $res->fetch()) {
             $ids[] = (int)$row['ID'];
         }
         if (!$ids) {
@@ -99,26 +105,28 @@ class MaintenanceService
             return ['imports' => 0, 'issues' => 0, 'changes' => $logs['changes'], 'errors' => $logs['errors'], 'files' => 0];
         }
         $result = $this->deleteImports($ids, $deleteFiles);
-        $leftoverLogs = $this->clearLogs();
-        $result['changes'] += $leftoverLogs['changes'];
-        $result['errors'] += $leftoverLogs['errors'];
+        $leftover = $this->clearLogs();
+        $result['changes'] += $leftover['changes'];
+        $result['errors'] += $leftover['errors'];
         return $result;
     }
 
     private function deletePhysicalFiles(array $importIds): int
     {
         $deleted = 0;
-        $docRoot = rtrim((string)$_SERVER['DOCUMENT_ROOT'], '/');
+        $docRoot = rtrim((string)($_SERVER['DOCUMENT_ROOT'] ?? ''), '/');
+        $realDir = realpath($docRoot . '/upload/relod_seofixer');
+        if (!$realDir) {
+            return 0;
+        }
         $res = ImportTable::getList(['filter' => ['@ID' => $importIds], 'select' => ['FILE_NAME']]);
         while ($import = $res->fetch()) {
             $fileName = basename((string)$import['FILE_NAME']);
             if ($fileName === '') {
                 continue;
             }
-            $path = $docRoot . '/upload/relod_seofixer/' . $fileName;
-            $realDir = realpath($docRoot . '/upload/relod_seofixer');
-            $realFile = realpath($path);
-            if ($realDir && $realFile && strpos($realFile, $realDir) === 0 && is_file($realFile) && @unlink($realFile)) {
+            $realFile = realpath($realDir . '/' . $fileName);
+            if ($realFile && strpos($realFile, $realDir) === 0 && is_file($realFile) && @unlink($realFile)) {
                 $deleted++;
             }
         }
