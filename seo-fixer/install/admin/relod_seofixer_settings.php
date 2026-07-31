@@ -1,14 +1,18 @@
 <?php
-$__relodSeoFixerAdminPage = 'relod_seofixer_settings.php';
-$__relodSeoFixerModuleId = 'relod.seofixer';
-$__relodSeoFixerCandidates = [
-    $_SERVER['DOCUMENT_ROOT'] . '/local/modules/' . $__relodSeoFixerModuleId . '/admin/' . $__relodSeoFixerAdminPage,
-    $_SERVER['DOCUMENT_ROOT'] . '/bitrix/modules/' . $__relodSeoFixerModuleId . '/admin/' . $__relodSeoFixerAdminPage,
+/**
+ * Прокси-файл в /bitrix/admin/. Реальная страница лежит внутри модуля —
+ * ищем её и в /local/modules/, и в /bitrix/modules/.
+ */
+$page = 'relod_seofixer_settings.php';
+$moduleId = 'relod.seofixer';
+$candidates = [
+    $_SERVER['DOCUMENT_ROOT'] . '/local/modules/' . $moduleId . '/admin/' . $page,
+    $_SERVER['DOCUMENT_ROOT'] . '/bitrix/modules/' . $moduleId . '/admin/' . $page,
 ];
 
-foreach ($__relodSeoFixerCandidates as $__relodSeoFixerPath) {
-    if (is_file($__relodSeoFixerPath)) {
-        require $__relodSeoFixerPath;
+foreach ($candidates as $path) {
+    if (is_file($path)) {
+        require $path;
         return;
     }
 }
@@ -18,7 +22,7 @@ require $_SERVER['DOCUMENT_ROOT'] . '/bitrix/modules/main/include/prolog_admin_a
 CAdminMessage::ShowMessage([
     'TYPE' => 'ERROR',
     'MESSAGE' => 'Не найден файл страницы модуля RELOD SEO Fixer.',
-    'DETAILS' => 'Проверьте, что модуль установлен в /local/modules/relod.seofixer/ или /bitrix/modules/relod.seofixer/ и что внутри есть папка admin.',
+    'DETAILS' => 'Проверьте, что модуль установлен в /local/modules/relod.seofixer/ или /bitrix/modules/relod.seofixer/ и внутри есть папка admin.',
     'HTML' => true,
 ]);
 require $_SERVER['DOCUMENT_ROOT'] . '/bitrix/modules/main/include/epilog_admin.php';

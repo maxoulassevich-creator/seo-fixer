@@ -3,7 +3,7 @@
  * Прокси-файл в /bitrix/admin/. Реальная страница лежит внутри модуля —
  * ищем её и в /local/modules/, и в /bitrix/modules/.
  */
-$page = 'relod_seofixer_issues.php';
+$page = 'relod_seofixer_duplicates.php';
 $moduleId = 'relod.seofixer';
 $candidates = [
     $_SERVER['DOCUMENT_ROOT'] . '/local/modules/' . $moduleId . '/admin/' . $page,

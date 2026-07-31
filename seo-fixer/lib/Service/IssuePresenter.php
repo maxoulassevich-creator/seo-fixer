@@ -1,111 +1,222 @@
 <?php
 namespace Relod\SeoFixer\Service;
 
+use Relod\SeoFixer\Report\ReportCatalog;
+use Relod\SeoFixer\Target\SeoWriter;
+use Relod\SeoFixer\Target\UrlResolver;
+
+/**
+ * Человеческие формулировки для интерфейса: что за проблема,
+ * чем грозит, что модуль сделает и что нужно сделать руками.
+ */
 class IssuePresenter
 {
     public static function statusTitle(string $status): string
     {
         $map = [
             'new' => 'Нужно проверить',
-            'approved' => 'Отмечено к исправлению',
-            'skipped' => 'Пропущено',
-            'applied' => 'Исправлено',
-            'failed' => 'Не выполнено',
+            'approved' => 'Подтверждено к исправлению',
+            'applied' => 'Исправлено модулем',
+            'resolved' => 'Уже в порядке',
             'manual' => 'Нужна ручная правка',
+            'failed' => 'Не удалось',
+            'skipped' => 'Отклонено',
+            'info' => 'Информация',
         ];
         return $map[$status] ?? $status;
+    }
+
+    /** CSS-класс для статуса. */
+    public static function statusClass(string $status): string
+    {
+        $map = [
+            'new' => 'new',
+            'approved' => 'approved',
+            'applied' => 'ok',
+            'resolved' => 'ok',
+            'manual' => 'warn',
+            'failed' => 'bad',
+            'skipped' => 'muted',
+            'info' => 'muted',
+        ];
+        return $map[$status] ?? 'muted';
     }
 
     public static function riskTitle(string $risk): string
     {
         $map = [
-            'low' => 'Низкий риск: можно применить после проверки',
-            'medium' => 'Средний риск: проверьте и при необходимости отредактируйте',
-            'content' => 'Нужно подготовить текст/значение, без правки кода',
-            'review' => 'Нужна SEO-проверка решения, не обязательно разработчик',
-            'template' => 'Вероятно шаблон/компонент: показать файл и строку разработчику',
-            'manual' => 'Ручная задача только если модуль не найдёт безопасное место правки',
+            'low' => 'Низкий риск',
+            'medium' => 'Средний риск',
+            'template' => 'Нужен разработчик',
+            'infra' => 'Сервер или robots',
+            'review' => 'Нужно решение',
+            'info' => 'Без действий',
         ];
         return $map[$risk] ?? $risk;
     }
 
+    public static function riskHint(string $risk): string
+    {
+        $map = [
+            'low' => 'Точная замена по совпадению — безопасно применять пачкой.',
+            'medium' => 'Модуль запишет значение сам, но текст стоит просмотреть.',
+            'template' => 'Правка в шаблоне или компоненте: модуль покажет файл и строку.',
+            'infra' => 'Правится на сервере или в robots.txt, а не в контенте.',
+            'review' => 'Нужно решение человека: модуль не выбирает за вас.',
+            'info' => 'Информационная строка, действий не требует.',
+        ];
+        return $map[$risk] ?? '';
+    }
+
+    /**
+     * Короткое объяснение проблемы для карточки.
+     */
     public static function explain(array $issue): string
     {
-        $type = (string)$issue['ISSUE_TYPE'];
-        $messages = [
-            'redirect_links' => 'Ссылка ведёт на старый адрес с редиректом. После подтверждения модуль заменит точное совпадение на конечный адрес там, где найдёт его в разрешённых полях.',
-            'redirect_chain' => 'Найдена цепочка редиректов. Безопасное действие — заменить исходную ссылку на конечный URL, если он есть в отчёте.',
-            'pagerank_redirect' => 'PageRank уходит через перенаправление. Безопасное действие — заменить старую ссылку на конечный URL при точном совпадении.',
-            'https_to_http' => 'HTTPS-страница ссылается на HTTP-адрес. После подтверждения модуль попробует заменить http://shop.relod.ru на https://shop.relod.ru.',
-            'not_https' => 'Найден внутренний HTTP-адрес. После подтверждения модуль попробует заменить его на HTTPS.',
-            'invalid_url' => 'Найдена ссылка с неправильным форматом. Если модуль распознал однозначную техническую ошибку, он предлагает исправленный URL; иначе оставляет задачу на проверку.',
-            'missing_alt' => 'У изображения нет alt. Модуль подготавливает черновик alt по данным строки отчёта; его нужно проверить перед переносом.',
-            'empty_anchor' => 'Ссылка есть, но у неё нет понятного текста. Частая причина — картинка-ссылка без alt или шаблонный блок.',
-            'internal_nofollow' => 'На внутренней ссылке стоит nofollow. Массовое снятие запрещено: нужно понять, важная ли ссылка для индексации.',
-            'external_nofollow' => 'У внешней ссылки стоит nofollow. Это может быть нормальным для рекламных, пользовательских или недоверенных ссылок.',
-            'self_links' => 'Страница ссылается сама на себя. Часто это меню, хлебные крошки или карточка в списке.',
-            'max_html_size' => 'Страница содержит слишком много HTML. Модуль не удаляет части шаблона автоматически, но ищет возможные участки в шаблонных файлах.',
-            'min_text_html' => 'Полезного текста мало относительно HTML-кода. Обычно причина в меню, футере, фильтрах, слайдерах или скрытых блоках.',
-            'same_canonical' => 'Несколько страниц указывают один canonical. Нужно выбрать основной адрес и проверить назначение каждой страницы.',
-            'noncanonical_pages' => 'Страница не является основной по canonical. Нужно проверить, должна ли она продвигаться отдельно.',
-        ];
-        if (isset($messages[$type])) {
-            return $messages[$type];
-        }
-        if (strpos($type, 'title') !== false) {
-            return 'Проблема связана с title. Модуль показывает текущее значение и готовит черновик исправления, но не обрезает названия механически.';
-        }
-        if (strpos($type, 'description') !== false) {
-            return 'Проблема связана с description. Нужно сделать описание конкретным для страницы, без одинакового текста для всего сайта.';
-        }
-        if (strpos($type, 'h1') !== false) {
-            return 'Проблема связана с H1. На странице должен быть один главный заголовок; официальные названия нельзя сокращать механически.';
-        }
-        return 'Проблема загружена из отчёта Netpeak. Проверьте старое значение, предложенное действие и отметьте пункт к исправлению только если всё верно.';
+        $meta = ReportCatalog::explain((string)$issue['ISSUE_TYPE']);
+        return trim($meta['what']);
     }
 
-    public static function canTryAutoFix(array $issue): bool
+    public static function threat(array $issue): string
+    {
+        $meta = ReportCatalog::explain((string)$issue['ISSUE_TYPE']);
+        return trim($meta['why']);
+    }
+
+    public static function howTo(array $issue): string
+    {
+        $meta = ReportCatalog::explain((string)$issue['ISSUE_TYPE']);
+        return trim($meta['how']);
+    }
+
+    /**
+     * Что именно сделает модуль, если подтвердить пункт.
+     */
+    public static function plannedAction(array $issue): string
     {
         $type = (string)$issue['ISSUE_TYPE'];
-        $old = trim((string)$issue['OLD_VALUE']);
-        $new = trim((string)$issue['NEW_VALUE']);
-        if ($old === '' || $new === '') {
-            return false;
+        $strategy = ReportCatalog::strategy($type);
+        $newValue = trim((string)($issue['NEW_VALUE'] ?? ''));
+        $targetNote = trim((string)($issue['TARGET_NOTE'] ?? ''));
+
+        if (!ReportCatalog::isAuto($type)) {
+            return 'Модуль не меняет это автоматически — он показывает точное место и готовое решение.';
+        }
+        if ($newValue === '') {
+            return 'Нужно значение для замены: нажмите «Подобрать предложения» или впишите его вручную.';
         }
 
-        $exactReplaceTypes = [
-            'redirect_links', 'redirect_chain', 'pagerank_redirect',
-            'https_to_http', 'not_https', 'invalid_url', 'uppercase_url', 'encoded_url',
-        ];
+        switch ($strategy) {
+            case ReportCatalog::STRATEGY_SEO_TITLE:
+            case ReportCatalog::STRATEGY_SEO_DESCRIPTION:
+            case ReportCatalog::STRATEGY_SEO_H1:
+                $field = SeoWriter::fieldTitle((string)(ReportCatalog::valueField($type) ?? ''));
+                $where = $targetNote !== '' ? $targetNote : 'найденная запись Битрикса';
+                return 'Модуль запишет ' . $field . ' в SEO-поля: ' . $where . '.';
 
-        return in_array($type, $exactReplaceTypes, true);
+            case ReportCatalog::STRATEGY_LINK_REPLACE:
+                return 'Модуль найдёт точное вхождение адреса в текстах, свойствах и файлах шаблона и заменит только его.';
+
+            case ReportCatalog::STRATEGY_IMAGE_ALT:
+                return 'Модуль подготовил описание картинки — вставьте его в alt изображения.';
+
+            default:
+                return 'Модуль покажет место проблемы и предложит решение.';
+        }
     }
 
+    /**
+     * Точная инструкция «сделай вот это», когда автоматика не применима.
+     */
     public static function manualInstruction(array $issue): string
     {
         $type = (string)$issue['ISSUE_TYPE'];
-        $source = (string)($issue['SOURCE_URL'] ?? '');
-        $old = (string)($issue['OLD_VALUE'] ?? '');
-        $new = (string)($issue['NEW_VALUE'] ?? '');
+        $strategy = ReportCatalog::strategy($type);
+        $url = trim((string)($issue['SOURCE_URL'] ?? ''));
+        $newValue = trim((string)($issue['NEW_VALUE'] ?? ''));
+        $adminUrl = trim((string)($issue['TARGET_ADMIN_URL'] ?? ''));
+        $targetNote = trim((string)($issue['TARGET_NOTE'] ?? ''));
 
-        if (strpos($type, 'description') !== false) {
-            return 'Откройте SEO-поля страницы' . ($source !== '' ? ' ' . $source : '') . ', замените общий meta description на индивидуальный. Черновик в поле «Предлагается»: ' . $new;
+        $where = $targetNote !== '' ? $targetNote : ($url !== '' ? 'страница ' . $url : 'страница из отчёта');
+        $link = $adminUrl !== '' ? ' Форма редактирования: ' . $adminUrl : '';
+
+        switch ($strategy) {
+            case ReportCatalog::STRATEGY_SEO_TITLE:
+            case ReportCatalog::STRATEGY_SEO_DESCRIPTION:
+            case ReportCatalog::STRATEGY_SEO_H1:
+                $field = SeoWriter::fieldTitle((string)(ReportCatalog::valueField($type) ?? ''));
+                return 'Откройте ' . $where . ', вкладка «SEO», и запишите ' . $field . ': ' . ($newValue !== '' ? '«' . $newValue . '»' : '(значение нужно подобрать)') . '.' . $link;
+
+            case ReportCatalog::STRATEGY_LINK_REPLACE:
+                $old = trim((string)($issue['OLD_VALUE'] ?? ''));
+                return 'Замените ссылку «' . $old . '» на «' . ($newValue !== '' ? $newValue : 'рабочий адрес') . '». Ссылка стоит на странице ' . $url . '.';
+
+            case ReportCatalog::STRATEGY_SERVER:
+                return 'Это серверная проблема: страница ' . $url . ' отдаёт ошибку. Проверьте нагрузку, лимиты хостинга и режим технических работ. Текстовыми правками это не лечится.';
+
+            case ReportCatalog::STRATEGY_ROBOTS:
+                return 'Проверьте правила индексации для ' . $url . ': robots.txt («Маркетинг → Поисковая оптимизация → Управление robots.txt»), meta robots и заголовок X-Robots-Tag.';
+
+            case ReportCatalog::STRATEGY_TEMPLATE:
+                return 'Правка в шаблоне или компоненте. Проверьте меню, футер, карточку товара или фильтр на странице ' . $url . '. Если модуль нашёл файл, путь и строка есть в журнале ошибок.';
+
+            case ReportCatalog::STRATEGY_IMAGE_ALT:
+                return 'Заполните alt у изображения на странице ' . $url . '. Черновик: ' . $newValue;
+
+            case ReportCatalog::STRATEGY_INFO:
+                return 'Информационная строка — действий не требует.';
+
+            default:
+                return 'Нужно решение специалиста: ' . ReportCatalog::explain($type)['how'];
         }
-        if (strpos($type, 'title') !== false) {
-            return 'Откройте SEO-поле title страницы' . ($source !== '' ? ' ' . $source : '') . ' и проверьте предложенный title: ' . $new;
+    }
+
+    /**
+     * Название места хранения для интерфейса.
+     */
+    public static function targetTitle(array $issue): string
+    {
+        $type = (string)($issue['TARGET_TYPE'] ?? '');
+        switch ($type) {
+            case UrlResolver::TARGET_ELEMENT:
+                return 'Элемент инфоблока';
+            case UrlResolver::TARGET_SECTION:
+                return 'Раздел инфоблока';
+            case UrlResolver::TARGET_PAGE:
+                return 'Статическая страница';
+            case UrlResolver::TARGET_NONE:
+            case '':
+                return 'Не определено';
+            default:
+                return $type;
         }
-        if (strpos($type, 'h1') !== false) {
-            return 'Проверьте вывод H1 на странице' . ($source !== '' ? ' ' . $source : '') . '. Должен остаться один главный H1. Предложение: ' . $new;
+    }
+
+    /**
+     * Итог живой проверки в коротком виде.
+     */
+    public static function liveSummary(array $issue): string
+    {
+        $status = (int)($issue['LIVE_STATUS'] ?? 0);
+        $checked = trim((string)($issue['LIVE_CHECKED_AT'] ?? ''));
+        if ($checked === '' && $status === 0) {
+            return 'Сайт ещё не проверялся';
         }
-        if ($type === 'missing_alt') {
-            return 'Найдите изображение в контенте или медиабиблиотеке и заполните alt. Черновик: ' . $new;
+        if ($status === 0) {
+            return 'Сайт не ответил';
         }
-        if (in_array($type, ['max_html_size', 'min_text_html', 'max_internal_links', 'max_external_links', 'empty_anchor', 'internal_nofollow', 'external_nofollow', 'self_links'], true)) {
-            return 'Проверьте шаблон, компонент, меню, футер, фильтр или карточку товара. Если модуль нашёл файл, в журнале будет путь, строка и фрагмент кода.';
-        }
-        if ($old !== '' && $new !== '') {
-            return 'Замените точное значение «' . $old . '» на «' . $new . '» в месте, указанном в строке отчёта.';
-        }
-        return 'Точного безопасного исправления нет. Проверьте строку отчёта и создайте задачу на SEO/разработчика только после подтверждения причины.';
+        return 'Код ответа ' . $status;
+    }
+
+    /** Все статусы для фильтров. */
+    public static function statuses(): array
+    {
+        return ['new', 'approved', 'applied', 'resolved', 'manual', 'failed', 'skipped', 'info'];
+    }
+
+    /** Все уровни риска для фильтров. */
+    public static function risks(): array
+    {
+        return ['low', 'medium', 'template', 'infra', 'review', 'info'];
     }
 }

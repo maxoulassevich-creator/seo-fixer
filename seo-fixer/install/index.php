@@ -1,5 +1,4 @@
 <?php
-use Bitrix\Main\Application;
 use Bitrix\Main\Loader;
 use Bitrix\Main\ModuleManager;
 
@@ -9,9 +8,9 @@ class relod_seofixer extends CModule
     public $MODULE_VERSION;
     public $MODULE_VERSION_DATE;
     public $MODULE_NAME = 'RELOD SEO Fixer';
-    public $MODULE_DESCRIPTION = 'Импорт отчётов Netpeak Spider, ручное подтверждение SEO-исправлений, логи и откат.';
+    public $MODULE_DESCRIPTION = 'Импорт отчётов Netpeak Spider, проверка сайта в реальном времени, подтверждаемые SEO-исправления, журналы и откат. Работает с любым количеством сайтов.';
     public $PARTNER_NAME = 'RELOD';
-    public $PARTNER_URI = 'https://shop.relod.ru/';
+    public $PARTNER_URI = '';
 
     public function __construct()
     {
@@ -28,6 +27,7 @@ class relod_seofixer extends CModule
         Loader::includeModule($this->MODULE_ID);
         $this->InstallDB();
         $this->InstallFiles();
+        $this->setDefaultOptions();
         $APPLICATION->IncludeAdminFile('Установка модуля RELOD SEO Fixer', __DIR__ . '/step.php');
     }
 
@@ -37,116 +37,40 @@ class relod_seofixer extends CModule
         $step = (int)$step;
         if ($step < 2) {
             $APPLICATION->IncludeAdminFile('Удаление модуля RELOD SEO Fixer', __DIR__ . '/unstep1.php');
-        } else {
-            $saveData = ($_REQUEST['savedata'] ?? 'Y') === 'Y';
-            $this->UnInstallFiles();
-            if (!$saveData) {
-                $this->UnInstallDB();
-            }
-            ModuleManager::unRegisterModule($this->MODULE_ID);
-            $APPLICATION->IncludeAdminFile('Удаление модуля RELOD SEO Fixer', __DIR__ . '/unstep2.php');
+            return;
         }
+
+        $saveData = ($_REQUEST['savedata'] ?? 'Y') === 'Y';
+        $this->UnInstallFiles();
+        if (!$saveData) {
+            $this->UnInstallDB();
+        }
+        ModuleManager::unRegisterModule($this->MODULE_ID);
+        $APPLICATION->IncludeAdminFile('Удаление модуля RELOD SEO Fixer', __DIR__ . '/unstep2.php');
     }
 
+    /**
+     * Структура БД создаётся и обновляется одним сервисом, поэтому
+     * повторная установка поверх версии 1.x безопасно доводит таблицы
+     * до актуального вида, не теряя данные.
+     */
     public function InstallDB()
     {
-        $connection = Application::getConnection();
-        $helper = $connection->getSqlHelper();
-
-        if (!$connection->isTableExists('b_relod_seofixer_import')) {
-            $connection->queryExecute("CREATE TABLE b_relod_seofixer_import (
-                ID INT NOT NULL AUTO_INCREMENT,
-                FILE_NAME VARCHAR(255) NOT NULL,
-                ORIGINAL_NAME VARCHAR(255) NULL,
-                REPORT_TYPE VARCHAR(100) NOT NULL,
-                ROWS_TOTAL INT NOT NULL DEFAULT 0,
-                FILE_HASH VARCHAR(64) NULL,
-                STATUS VARCHAR(50) NOT NULL DEFAULT 'uploaded',
-                COMMENT_TEXT TEXT NULL,
-                IMPORTED_BY INT NULL,
-                IMPORTED_AT DATETIME NOT NULL,
-                PRIMARY KEY (ID),
-                INDEX ix_relod_seofixer_import_type (REPORT_TYPE),
-                INDEX ix_relod_seofixer_import_status (STATUS)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-        }
-
-        if (!$connection->isTableExists('b_relod_seofixer_issue')) {
-            $connection->queryExecute("CREATE TABLE b_relod_seofixer_issue (
-                ID INT NOT NULL AUTO_INCREMENT,
-                IMPORT_ID INT NOT NULL,
-                ISSUE_TYPE VARCHAR(100) NOT NULL,
-                SEVERITY VARCHAR(30) NULL,
-                SOURCE_URL TEXT NULL,
-                TARGET_URL TEXT NULL,
-                FINAL_URL TEXT NULL,
-                ANCHOR_TEXT TEXT NULL,
-                OLD_VALUE MEDIUMTEXT NULL,
-                NEW_VALUE MEDIUMTEXT NULL,
-                PLACE_HINT VARCHAR(255) NULL,
-                RISK_LEVEL VARCHAR(30) NOT NULL DEFAULT 'manual',
-                STATUS VARCHAR(30) NOT NULL DEFAULT 'new',
-                RAW_DATA MEDIUMTEXT NULL,
-                GROUP_HASH VARCHAR(64) NULL,
-                CREATED_AT DATETIME NOT NULL,
-                UPDATED_AT DATETIME NULL,
-                PRIMARY KEY (ID),
-                INDEX ix_relod_seofixer_issue_import (IMPORT_ID),
-                INDEX ix_relod_seofixer_issue_type (ISSUE_TYPE),
-                INDEX ix_relod_seofixer_issue_status (STATUS),
-                INDEX ix_relod_seofixer_issue_group (GROUP_HASH)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-        }
-
-        if (!$connection->isTableExists('b_relod_seofixer_change')) {
-            $connection->queryExecute("CREATE TABLE b_relod_seofixer_change (
-                ID INT NOT NULL AUTO_INCREMENT,
-                ISSUE_ID INT NOT NULL,
-                IMPORT_ID INT NOT NULL,
-                ENTITY_TYPE VARCHAR(80) NOT NULL,
-                ENTITY_ID INT NULL,
-                FIELD_NAME VARCHAR(100) NULL,
-                OLD_VALUE MEDIUMTEXT NULL,
-                NEW_VALUE MEDIUMTEXT NULL,
-                STATUS VARCHAR(30) NOT NULL DEFAULT 'pending',
-                MESSAGE_TEXT TEXT NULL,
-                APPLIED_BY INT NULL,
-                APPLIED_AT DATETIME NULL,
-                ROLLED_BACK_BY INT NULL,
-                ROLLED_BACK_AT DATETIME NULL,
-                PRIMARY KEY (ID),
-                INDEX ix_relod_seofixer_change_issue (ISSUE_ID),
-                INDEX ix_relod_seofixer_change_import (IMPORT_ID),
-                INDEX ix_relod_seofixer_change_status (STATUS)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-        }
-
-        if (!$connection->isTableExists('b_relod_seofixer_error_log')) {
-            $connection->queryExecute("CREATE TABLE b_relod_seofixer_error_log (
-                ID INT NOT NULL AUTO_INCREMENT,
-                IMPORT_ID INT NULL,
-                ISSUE_ID INT NULL,
-                LEVEL VARCHAR(20) NOT NULL DEFAULT 'error',
-                MESSAGE_TEXT TEXT NOT NULL,
-                CONTEXT_JSON MEDIUMTEXT NULL,
-                CREATED_AT DATETIME NOT NULL,
-                PRIMARY KEY (ID),
-                INDEX ix_relod_seofixer_error_import (IMPORT_ID),
-                INDEX ix_relod_seofixer_error_issue (ISSUE_ID),
-                INDEX ix_relod_seofixer_error_level (LEVEL)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-        }
-
+        Loader::includeModule($this->MODULE_ID);
+        \Relod\SeoFixer\Service\Schema::install();
         return true;
     }
 
     public function UnInstallDB()
     {
-        $connection = Application::getConnection();
-        foreach (['b_relod_seofixer_error_log','b_relod_seofixer_change','b_relod_seofixer_issue','b_relod_seofixer_import'] as $table) {
-            if ($connection->isTableExists($table)) {
-                $connection->queryExecute('DROP TABLE ' . $table);
-            }
+        Loader::includeModule($this->MODULE_ID);
+        \Relod\SeoFixer\Service\Schema::uninstall();
+        foreach ([
+            'batch_limit', 'allow_template_file_autofix', 'allow_static_page_write',
+            'http_timeout', 'http_delay_ms', 'http_user_agent', 'verify_on_import',
+            'tpl_title', 'tpl_description', 'tpl_description_tail',
+        ] as $option) {
+            COption::RemoveOption('relod.seofixer', $option);
         }
         return true;
     }
@@ -163,5 +87,22 @@ class relod_seofixer extends CModule
             @unlink($file);
         }
         return true;
+    }
+
+    private function setDefaultOptions(): void
+    {
+        $defaults = [
+            'batch_limit' => '50',
+            'allow_template_file_autofix' => 'N',
+            'allow_static_page_write' => 'Y',
+            'http_timeout' => '15',
+            'http_delay_ms' => '150',
+            'verify_on_import' => 'Y',
+        ];
+        foreach ($defaults as $name => $value) {
+            if (COption::GetOptionString('relod.seofixer', $name, '') === '') {
+                COption::SetOptionString('relod.seofixer', $name, $value);
+            }
+        }
     }
 }
