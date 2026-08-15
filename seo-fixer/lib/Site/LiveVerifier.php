@@ -135,13 +135,11 @@ class LiveVerifier
         $type = (string)$issue['ISSUE_TYPE'];
         $reported = trim((string)($issue['OLD_VALUE'] ?? ''));
 
-        // Страница недоступна — любые правки текста бессмысленны.
+        // Адрес отвечает ошибкой. Что это значит — зависит от типа проблемы:
+        // для мета-тегов это стоп-сигнал, а для битой ссылки, наоборот,
+        // подтверждение проблемы.
         if ($live['status'] >= 400) {
-            return [
-                'resolved' => false,
-                'live_value' => null,
-                'text' => 'Сейчас страница отдаёт ' . $live['status'] . ' (' . $live['status_text'] . '). Пока она недоступна, править мета-теги бесполезно — сначала нужно восстановить страницу.',
-            ];
+            return $this->verdictForErrorStatus($strategy, $live);
         }
 
         switch ($strategy) {
@@ -224,6 +222,56 @@ class LiveVerifier
                     'text' => 'Проверено сейчас: страница отвечает ' . $live['status'] . ', ответ за ' . $live['response_ms'] . ' мс.' . $extra,
                 ];
         }
+    }
+
+    /**
+     * Вердикт, когда адрес ответил кодом ошибки.
+     *
+     * @return array{resolved:bool,text:string,live_value:?string}
+     */
+    private function verdictForErrorStatus(string $strategy, array $live): array
+    {
+        $status = (int)$live['status'];
+        $isLink = $strategy === ReportCatalog::STRATEGY_LINK_REPLACE;
+
+        // Сайт отказывает и на самой странице, и на главной — значит дело
+        // не в конкретной странице. Чаще всего это защита от автоматических
+        // запросов, а не поломка: в браузере такие страницы открываются.
+        if (!empty($live['refused']) && $this->inspector->siteRefusesRequests((string)$live['url'])) {
+            return [
+                'resolved' => false,
+                'live_value' => null,
+                'text' => 'Проверить не удалось: сайт отвечает ' . $status . ' и на этот адрес, и на главную страницу'
+                    . (($live['attempts'] ?? 1) > 1 ? ' (попыток: ' . (int)$live['attempts'] . ')' : '')
+                    . '. Обычно так ведёт себя защита от автоматических запросов — в браузере страница при этом открывается. '
+                    . 'Увеличьте паузу между запросами или укажите User-Agent браузера в настройках модуля, затем повторите проверку. '
+                    . 'Данные в карточке взяты из отчёта.',
+            ];
+        }
+
+        if ($isLink) {
+            return [
+                'resolved' => false,
+                'live_value' => (string)$status,
+                'text' => 'Подтверждено: адрес ссылки отвечает ' . $status . ' (' . $live['status_text'] . '). '
+                    . 'Ссылку нужно заменить на рабочий адрес или убрать со страницы.',
+            ];
+        }
+
+        if ($strategy === ReportCatalog::STRATEGY_SERVER) {
+            return [
+                'resolved' => false,
+                'live_value' => (string)$status,
+                'text' => 'Подтверждено: страница по-прежнему отдаёт ' . $status . '. Ответ занял ' . (int)$live['response_ms'] . ' мс.',
+            ];
+        }
+
+        return [
+            'resolved' => false,
+            'live_value' => null,
+            'text' => 'Сейчас страница отдаёт ' . $status . ' (' . $live['status_text'] . '). '
+                . 'Пока она недоступна, править мета-теги бесполезно — сначала нужно восстановить страницу.',
+        ];
     }
 
     /**

@@ -239,7 +239,13 @@ class FixService
         // Живая проверка перед правкой: вдруг страница лежит или уже исправлена.
         $live = $this->inspector->inspect($url);
         if ($live['status'] >= 400 || $live['status'] === 0) {
-            return $this->markFailed($issue, $now, 'Страница сейчас недоступна (код ' . $live['status'] . '). Правка отменена, чтобы не менять данные вслепую.');
+            $refused = !empty($live['refused']) && $this->inspector->siteRefusesRequests($url);
+            $reason = $refused
+                ? 'Проверить страницу не удалось: сайт отвечает ' . (int)$live['status'] . ' и на неё, и на главную. '
+                    . 'Похоже на защиту от автоматических запросов, а не на поломку страницы. '
+                    . 'Увеличьте паузу между запросами или задайте User-Agent браузера в настройках модуля и повторите.'
+                : 'Страница сейчас недоступна (код ' . (int)$live['status'] . '). Правка отменена, чтобы не менять данные вслепую.';
+            return $this->markFailed($issue, $now, $reason);
         }
         $liveValue = $field === 'h1'
             ? (string)($live['h1'][0] ?? '')

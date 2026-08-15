@@ -61,6 +61,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && check_bitrix_sessid()) {
             COption::SetOptionString('relod.seofixer', 'verify_on_import', (($_POST['verify_on_import'] ?? 'N') === 'Y') ? 'Y' : 'N');
             COption::SetOptionString('relod.seofixer', 'http_timeout', (string)max(3, min(60, (int)($_POST['http_timeout'] ?? 15))));
             COption::SetOptionString('relod.seofixer', 'http_delay_ms', (string)max(0, min(5000, (int)($_POST['http_delay_ms'] ?? 150))));
+            COption::SetOptionString('relod.seofixer', 'http_retries', (string)max(0, min(5, (int)($_POST['http_retries'] ?? 2))));
             COption::SetOptionString('relod.seofixer', 'http_user_agent', trim((string)($_POST['http_user_agent'] ?? '')));
             COption::SetOptionString('relod.seofixer', 'tpl_title', trim((string)($_POST['tpl_title'] ?? '')));
             COption::SetOptionString('relod.seofixer', 'tpl_description', trim((string)($_POST['tpl_description'] ?? '')));
@@ -82,6 +83,7 @@ $allowStatic = COption::GetOptionString('relod.seofixer', 'allow_static_page_wri
 $verifyOnImport = COption::GetOptionString('relod.seofixer', 'verify_on_import', 'Y') === 'Y';
 $httpTimeout = (int)COption::GetOptionString('relod.seofixer', 'http_timeout', '15');
 $httpDelay = (int)COption::GetOptionString('relod.seofixer', 'http_delay_ms', '150');
+$httpRetries = (int)COption::GetOptionString('relod.seofixer', 'http_retries', '2');
 $userAgent = (string)COption::GetOptionString('relod.seofixer', 'http_user_agent', '');
 $tplTitle = (string)COption::GetOptionString('relod.seofixer', 'tpl_title', '');
 $tplDescription = (string)COption::GetOptionString('relod.seofixer', 'tpl_description', '');
@@ -211,14 +213,21 @@ echo AdminHelper::hint('Базовый режим безопасный: посл
         <th>Пауза между запросами, мс</th>
         <td>
             <input class="sf-input" style="width:90px" type="number" name="http_delay_ms" min="0" max="5000" value="<?= $httpDelay; ?>">
-            <small>Защищает сайт от нагрузки при массовой проверке. Если сайт отдаёт 503 при обходе, увеличьте паузу.</small>
+            <small>Защищает сайт от нагрузки при массовой проверке. Если сайт отдаёт 503, увеличьте паузу до 500–1000 мс.</small>
+        </td>
+    </tr>
+    <tr>
+        <th>Повторов при ошибке 429 или 5xx</th>
+        <td>
+            <input class="sf-input" style="width:90px" type="number" name="http_retries" min="0" max="5" value="<?= $httpRetries; ?>">
+            <small>Эти коды обычно означают сработавший антифлуд, а не сломанную страницу. Модуль повторит запрос с нарастающей паузой, прежде чем считать адрес недоступным.</small>
         </td>
     </tr>
     <tr>
         <th>User-Agent</th>
         <td>
-            <input class="sf-input" style="width:100%;max-width:560px" type="text" name="http_user_agent" value="<?= AdminHelper::e($userAgent); ?>" placeholder="Mozilla/5.0 (compatible; RelodSeoFixer/2.0; +bitrix-module)">
-            <small>Если сайт блокирует ботов, укажите User-Agent обычного браузера.</small>
+            <input class="sf-input" style="width:100%;max-width:560px" type="text" name="http_user_agent" value="<?= AdminHelper::e($userAgent); ?>" placeholder="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36">
+            <small>По умолчанию модуль представляется обычным браузером Chrome. Оставьте поле пустым, если не нужен свой вариант.</small>
         </td>
     </tr>
     <tr>

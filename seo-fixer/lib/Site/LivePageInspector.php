@@ -15,8 +15,20 @@ class LivePageInspector
     /** Максимальный размер тела ответа, который читаем (2 МБ). */
     private const MAX_BODY = 2097152;
 
+    /**
+     * Коды, которыми сайт «отказывает» запросу: обычно это защита от ботов
+     * или временная перегрузка, а не сломанная страница.
+     */
+    private const REFUSAL_CODES = [403, 429, 503];
+
     /** @var array<string,array> */
     private $cache = [];
+
+    /** @var array<string,bool> Здоровье хоста, общее для всех экземпляров. */
+    private static $hostHealth = [];
+
+    /** @var int */
+    private $retries;
 
     /** @var int */
     private $timeout;
@@ -32,6 +44,7 @@ class LivePageInspector
         $this->delayMs = $delayMs >= 0
             ? $delayMs
             : max(0, min(5000, (int)\COption::GetOptionString('relod.seofixer', 'http_delay_ms', '150')));
+        $this->retries = max(0, min(5, (int)\COption::GetOptionString('relod.seofixer', 'http_retries', '2')));
     }
 
     /**
@@ -56,11 +69,40 @@ class LivePageInspector
             return $this->cache[$url] = $result;
         }
 
-        if ($this->delayMs > 0) {
-            usleep($this->delayMs * 1000);
+        // Коды 429 и 5xx часто означают не сломанную страницу, а сработавший
+        // антифлуд. Повторяем запрос с нарастающей паузой, прежде чем делать
+        // вывод, что страница недоступна.
+        $attempts = $this->retries + 1;
+        for ($attempt = 1; $attempt <= $attempts; $attempt++) {
+            if ($this->delayMs > 0) {
+                usleep($this->delayMs * 1000);
+            }
+            if ($attempt > 1) {
+                usleep(min(8, $attempt) * 1000000);
+            }
+
+            $result = $this->performRequest($url);
+            $result['attempts'] = $attempt;
+
+            $temporary = $result['status'] === 429 || $result['status'] >= 500;
+            if (!$temporary || $attempt === $attempts) {
+                break;
+            }
         }
 
+        $result['refused'] = in_array((int)$result['status'], self::REFUSAL_CODES, true);
+
+        return $this->cache[$url] = $result;
+    }
+
+    /**
+     * Один HTTP-запрос без повторов.
+     */
+    private function performRequest(string $url): array
+    {
+        $result = $this->emptyResult($url);
         $started = microtime(true);
+
         try {
             $client = new HttpClient([
                 'redirect' => true,
@@ -70,18 +112,24 @@ class LivePageInspector
                 'version' => HttpClient::HTTP_1_1,
                 'disableSslVerification' => true,
             ]);
+            // Набор заголовков обычного браузера: без него часть сайтов
+            // отвечает отказом на любой автоматический запрос.
             $client->setHeader('User-Agent', $this->userAgent());
-            $client->setHeader('Accept', 'text/html,application/xhtml+xml');
+            $client->setHeader('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8');
+            $client->setHeader('Accept-Language', 'ru-RU,ru;q=0.9,en;q=0.8');
+            $client->setHeader('Cache-Control', 'no-cache');
+
             $body = $client->get($url);
             $result['response_ms'] = (int)round((microtime(true) - $started) * 1000);
             $result['status'] = (int)$client->getStatus();
             $result['effective_url'] = (string)($client->getEffectiveUrl() ?: $url);
             $result['redirected'] = $this->stripFragment($result['effective_url']) !== $this->stripFragment($url);
             $result['x_robots'] = (string)$client->getHeaders()->get('X-Robots-Tag');
+            $result['status_text'] = $this->statusText($result['status']);
 
             if ($body === false) {
                 $result['error'] = 'Сервер не ответил или соединение прервалось.';
-                return $this->cache[$url] = $result;
+                return $result;
             }
 
             $body = (string)$body;
@@ -90,7 +138,6 @@ class LivePageInspector
             }
 
             $result['ok'] = $result['status'] >= 200 && $result['status'] < 400;
-            $result['status_text'] = $this->statusText($result['status']);
 
             $parsed = $this->parseHtml($body);
             foreach ($parsed as $k => $v) {
@@ -101,7 +148,7 @@ class LivePageInspector
             $result['error'] = 'Ошибка запроса: ' . $e->getMessage();
         }
 
-        return $this->cache[$url] = $result;
+        return $result;
     }
 
     /**
@@ -268,10 +315,52 @@ class LivePageInspector
         return rtrim((string)preg_replace('~#.*$~', '', trim($url)), '/');
     }
 
+    /**
+     * По умолчанию представляемся обычным браузером.
+     *
+     * С «честным» User-Agent робота многие сайты (защита от ботов, антифлуд
+     * Битрикса, настройки хостинга) отвечают 503 или 403, и модуль ошибочно
+     * считал живые страницы недоступными.
+     */
     private function userAgent(): string
     {
         $custom = trim((string)\COption::GetOptionString('relod.seofixer', 'http_user_agent', ''));
-        return $custom !== '' ? $custom : 'Mozilla/5.0 (compatible; RelodSeoFixer/2.0; +bitrix-module)';
+        if ($custom !== '') {
+            return $custom;
+        }
+        return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+            . '(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+    }
+
+    /**
+     * Проверяет, не отвечает ли сайт целиком отказом.
+     *
+     * Если и запрошенная страница, и корень сайта отдают 403/429/503, дело
+     * почти наверняка не в конкретной странице: либо сайт лежит целиком,
+     * либо срабатывает защита от автоматических запросов.
+     */
+    public function siteRefusesRequests(string $url): bool
+    {
+        $host = (string)parse_url($url, PHP_URL_HOST);
+        $scheme = (string)parse_url($url, PHP_URL_SCHEME);
+        if ($host === '') {
+            return false;
+        }
+        if (isset(self::$hostHealth[$host])) {
+            return self::$hostHealth[$host];
+        }
+
+        $root = ($scheme !== '' ? $scheme : 'https') . '://' . $host . '/';
+        // Помечаем заранее, иначе проверка корня уйдёт в рекурсию.
+        self::$hostHealth[$host] = false;
+        $rootResult = $this->inspect($root);
+
+        return self::$hostHealth[$host] = in_array((int)$rootResult['status'], self::REFUSAL_CODES, true);
+    }
+
+    public static function resetHostHealth(): void
+    {
+        self::$hostHealth = [];
     }
 
     private function statusText(int $status): string
@@ -315,6 +404,8 @@ class LivePageInspector
             'text_ratio' => 0.0,
             'response_ms' => 0,
             'error' => '',
+            'attempts' => 0,
+            'refused' => false,
         ];
     }
 }
