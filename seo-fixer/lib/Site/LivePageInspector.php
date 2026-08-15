@@ -133,6 +133,7 @@ class LivePageInspector
             'h1_count' => 0,
             'canonical' => '',
             'meta_robots' => '',
+            'content' => '',
             'html_size' => strlen($html),
             'text_size' => 0,
             'text_ratio' => 0.0,
@@ -185,7 +186,59 @@ class LivePageInspector
         $out['text_size'] = function_exists('mb_strlen') ? mb_strlen($text, 'UTF-8') : strlen($text);
         $out['text_ratio'] = $out['html_size'] > 0 ? round($out['text_size'] / $out['html_size'], 4) : 0.0;
 
+        $out['content'] = $this->extractContent($html);
+
         return $out;
+    }
+
+    /**
+     * Достаёт осмысленный текст самой страницы — обычно первый абзац.
+     *
+     * Нужен, чтобы описание страницы строилось из её настоящего содержания,
+     * а не из шаблонной фразы: иначе у всех страниц получается почти
+     * одинаковый текст, и дубликаты устраняются лишь формально.
+     */
+    public function extractContent(string $html): string
+    {
+        // Убираем обвязку: меню, шапку, подвал, формы и скрипты.
+        $body = (string)preg_replace(
+            '~<(script|style|noscript|nav|header|footer|aside|form|select|button|svg)\b[^>]*>.*?</\1>~is',
+            ' ',
+            $html
+        );
+
+        $skip = '~(cookie|куки|подпис|рассылк|©|все права|©|политик[аи] конфиденциальност|обратн[ыа][йя] звонок|версия для слабовидящих)~iu';
+
+        // Сначала абзацы: они почти всегда и есть контент. Берём несколько
+        // подряд — одного часто не хватает на полноценное описание.
+        if (preg_match_all('~<p\b[^>]*>(.*?)</p>~is', $body, $matches)) {
+            $collected = '';
+            foreach ($matches[1] as $paragraph) {
+                $text = $this->cleanText($paragraph);
+                $len = function_exists('mb_strlen') ? mb_strlen($text, 'UTF-8') : strlen($text);
+                if ($len < 40 || preg_match($skip, $text)) {
+                    continue;
+                }
+                $collected .= ($collected !== '' ? ' ' : '') . rtrim($text, ' .') . '.';
+                if ((function_exists('mb_strlen') ? mb_strlen($collected, 'UTF-8') : strlen($collected)) >= 400) {
+                    break;
+                }
+            }
+            if ($collected !== '') {
+                return $collected;
+            }
+        }
+
+        // Иначе — текст после первого H1.
+        if (preg_match('~</h1>(.*)$~is', $body, $m)) {
+            $text = $this->cleanText($m[1]);
+            $len = function_exists('mb_strlen') ? mb_strlen($text, 'UTF-8') : strlen($text);
+            if ($len >= 60 && !preg_match($skip, mb_substr($text, 0, 120, 'UTF-8'))) {
+                return $text;
+            }
+        }
+
+        return '';
     }
 
     private function attr(string $tag, string $name): string

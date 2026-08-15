@@ -79,14 +79,27 @@ class SuggestionEngine
         // Слишком длинный заголовок режем по смысловой границе, а не по счёту
         // символов: обрыв посреди фразы читается хуже, чем короткий заголовок.
         $section = $this->sectionLabel($issue, $target);
+        $truncated = false;
         if ($type === 'long_title') {
             $budget = self::TITLE_MAX - ($brand !== '' ? $this->len($brand) + 3 : 0);
-            $label = $this->trimToClause($label, $budget);
+            $trimmed = $this->trimToClause($label, $budget);
+            $truncated = $trimmed !== $label;
+            $label = $trimmed;
             $section = '';
         }
 
-        if ($section !== '' && $this->norm($section) === $this->norm($label)) {
+        // «Учебники — раздел Учебники» звучит как ошибка: убираем повтор.
+        if ($section !== '' && $this->overlaps($section, $label)) {
             $section = '';
+        }
+
+        // Слишком общий заголовок вроде «Акции» не содержит запросов, по которым
+        // страницу ищут. Расширяем его естественным уточнением по назначению.
+        if (!$truncated && $this->len($label) + $this->len($brand) + 3 < self::TITLE_MIN) {
+            $extended = $this->titleQualifier($label, $issue);
+            if ($extended !== '' && !$this->repeatsWithin($extended . ' ' . $brand)) {
+                $label = $extended;
+            }
         }
 
         $value = $this->render($this->template('tpl_title', '{label}{ – section}{ | brand}'), [
@@ -105,11 +118,22 @@ class SuggestionEngine
         $len = $this->len($value);
         $short = $len < self::TITLE_MIN;
 
+        if ($truncated) {
+            // Исходный заголовок был перегружен ключевыми словами. Механическая
+            // обрезка почти всегда рвёт фразу, поэтому честно предупреждаем.
+            return [
+                'value' => $value,
+                'explanation' => 'Исходный заголовок (' . $this->len((string)$issue['OLD_VALUE']) . ' симв.) сокращён механически до ' . $len . ' симв. '
+                    . 'Фраза могла оборваться — перечитайте и при необходимости перепишите: заголовок должен быть законченным и содержать главный запрос страницы.',
+                'confidence' => 40,
+            ];
+        }
+
         $explanation = 'Заголовок собран из названия страницы'
             . ($section !== '' ? ', её раздела' : '')
             . ' и названия сайта, длина ' . $len . ' симв.'
             . ($short
-                ? ' Это короче нормы 30–65: добавьте уточнение, по какому запросу должна находиться страница.'
+                ? ' Короче нормы 30–65: добавьте уточнение, по какому запросу должна находиться страница.'
                 : ' Длина в норме (30–65).');
 
         return [
@@ -117,6 +141,43 @@ class SuggestionEngine
             'explanation' => $explanation,
             'confidence' => $short ? 55 : 80,
         ];
+    }
+
+    /**
+     * Естественное уточнение для слишком короткого заголовка.
+     * Ничего не выдумывает о содержимом — только уточняет назначение страницы.
+     */
+    private function titleQualifier(string $label, array $issue): string
+    {
+        $haystack = $this->norm($label . ' ' . (string)parse_url((string)($issue['SOURCE_URL'] ?? ''), PHP_URL_PATH));
+        if ($haystack === '') {
+            return '';
+        }
+
+        $map = [
+            'контакт|contacts' => '%s: адреса, телефоны и часы работы',
+            'акци|sales|скидк|распродаж' => '%s и специальные предложения',
+            'доставк|delivery' => '%s: способы, сроки и условия',
+            'оплат|payment' => '%s: способы оплаты заказа',
+            'возврат|refund' => '%s: сроки и порядок обращения',
+            'реквизит|requisites' => '%s компании',
+            'прайс|pricelist' => '%s: цены и условия',
+            'корзин|basket|cart' => '%s: оформление заказа',
+            'информац|/info' => '%s для покупателей',
+            'каталог|catalog' => '%s товаров',
+            'блог|blog' => '%s: статьи и новости',
+            'новост|news' => '%s компании',
+            'вопрос|faq|помощ' => '%s покупателям',
+            'о компании|about|о нас' => '%s: направления работы',
+            'издательств|publisher' => '%s и их книги',
+        ];
+
+        foreach ($map as $needle => $template) {
+            if (preg_match('~(' . $needle . ')~u', $haystack)) {
+                return trim(sprintf($template, rtrim($label, ' .')));
+            }
+        }
+        return '';
     }
 
     /**
@@ -140,21 +201,61 @@ class SuggestionEngine
         }
         if ($best > $max * 0.45) {
             $head = function_exists('mb_substr') ? mb_substr($head, 0, $best, 'UTF-8') : substr($head, 0, $best);
-            return rtrim($head, ' .,;:—–-');
+            // Обрезка по запятой тоже может оставить незаконченную фразу
+            // («…купить учебную»), поэтому чистим хвост и здесь.
+            return $this->dropDanglingWord(rtrim($head, ' .,;:—–-'));
         }
         return $this->dropDanglingWord($this->fitLength($value, $max));
     }
 
     /**
-     * Убирает повисший в конце предлог или союз: «…напрямую от» → «…напрямую».
+     * Убирает слова, на которых фраза не может закончиться: предлоги, союзы,
+     * глаголы в неопределённой форме и прилагательные без существительного.
+     *
+     * «Учебники по китайскому купить лучшую методическую» → «Учебники по китайскому».
      */
     private function dropDanglingWord(string $value): string
     {
-        for ($i = 0; $i < 3; $i++) {
-            if (!preg_match('~^(.*)\s(\p{L}{1,3})$~u', $value, $m)) {
+        // Инфинитивы (-ть/-ти/-чь) и однозначно прилагательные окончания.
+        // Окончания вроде -ей/-ой/-их намеренно не берём: под них попадают
+        // обычные существительные («дней», «людей»), и фраза резалась бы зря.
+        $dangling = '~^(.*?)\s(\p{L}{3,}(?:ть|ти|чь)|\p{L}{4,}(?:ую|ые|ый|ая|ое|ого|ому|ыми|ими))$~u';
+        $functionWord = '~\s(?:в|во|на|за|для|из|от|до|по|к|ко|с|со|о|об|при|над|под|про|у|и|а|но|или|что|как)$~ui';
+        $prepositions = 'в|во|на|за|для|из|от|до|по|к|ко|с|со|о|об|при|над|под|про|у';
+
+        // Оборванное перечисление после запятой: «…рабочих дней, в регионы».
+        // Такой хвост не несёт законченной мысли — отбрасываем его целиком.
+        $value = rtrim($value, ' ,;:—–-');
+        if (preg_match('~^(.{20,}),\s*(?:' . $prepositions . ')\s+[^,]{1,25}$~u', $value, $fragment)) {
+            $value = rtrim($fragment[1], ' ,;:—–-');
+        }
+
+        for ($i = 0; $i < 5; $i++) {
+            if (!preg_match($dangling, $value, $m)) {
                 break;
             }
-            $value = rtrim($m[1], ' ,;:—–-');
+            $trimmed = rtrim($m[1], ' ,;:—–-');
+            // Не срезаем до бессмысленного огрызка.
+            if ($this->len($trimmed) < 10) {
+                break;
+            }
+            // Если после среза фраза кончается предлогом («Учебники по»),
+            // значит срезали как раз то слово, ради которого предлог и стоял.
+            if (preg_match($functionWord, $trimmed)) {
+                break;
+            }
+            $value = $trimmed;
+        }
+
+        // Висящие служебные слова в самом конце убираем в любом случае:
+        // их может оказаться несколько подряд («…от издателей и с»).
+        $value = rtrim($value, ' ,;:—–-');
+        for ($i = 0; $i < 4; $i++) {
+            $stripped = rtrim((string)preg_replace($functionWord, '', $value), ' ,;:—–-');
+            if ($stripped === $value || $this->len($stripped) < 10) {
+                break;
+            }
+            $value = $stripped;
         }
         return $value;
     }
@@ -166,11 +267,62 @@ class SuggestionEngine
             return ['value' => null, 'explanation' => 'Не удалось определить содержание страницы — напишите описание вручную.', 'confidence' => 0];
         }
 
+        // Лучший источник — настоящий текст страницы. Он уникален сам по себе
+        // и читается естественно, в отличие от собранной по шаблону фразы.
+        $content = $this->cleanText((string)($live['content'] ?? ''));
+        if ($content !== '') {
+            $built = $this->descriptionFromContent($label, $content);
+            if ($built !== '') {
+                $len = $this->len($built);
+                return [
+                    'value' => $built,
+                    'explanation' => 'Описание составлено из текста самой страницы, длина ' . $len . ' симв.'
+                        . ($len < self::DESCRIPTION_MIN ? ' Это короче нормы 120–160 — при желании дополните.' : ' Длина в норме (120–160).'),
+                    'confidence' => 85,
+                ];
+            }
+        }
+
+        // Второй источник — собственный длинный заголовок страницы. На многих
+        // сайтах в title вынесено развёрнутое описание товара или раздела:
+        // это настоящий текст страницы, а не выдумка модуля.
+        $rich = $this->richTextFromFacts($issue, $label);
+        if ($rich !== '') {
+            $built = $this->descriptionFromContent($label, $rich);
+            if ($built !== '' && $this->len($built) > $this->len($label) + 20) {
+                $len = $this->len($built);
+                return [
+                    'value' => $built,
+                    'explanation' => 'Описание составлено из развёрнутого заголовка самой страницы, длина ' . $len . ' симв.'
+                        . ($len < self::DESCRIPTION_MIN ? ' Короче нормы 120–160 — при желании дополните.' : ' Длина в норме (120–160).'),
+                    'confidence' => 70,
+                ];
+            }
+        }
+
+        // Третий источник — типовая формулировка для служебной страницы.
+        $pattern = $this->descriptionPattern($label, $issue);
+        if ($pattern !== '') {
+            $len = $this->len($pattern);
+            return [
+                'value' => $this->fitLength($pattern, self::DESCRIPTION_MAX),
+                'explanation' => 'Использована типовая формулировка для страницы такого назначения, длина ' . $len . ' симв. '
+                    . 'Она описывает, зачем страница нужна; добавьте конкретику — и описание станет сильнее.',
+                'confidence' => 60,
+            ];
+        }
+
         $section = $this->sectionLabel($issue, $target);
-        if ($section !== '' && $this->norm($section) === $this->norm($label)) {
+        if ($section !== '' && $this->overlaps($section, $label)) {
             $section = '';
         }
-        $tail = $this->template('tpl_description_tail', 'Актуальная информация, условия, сроки и контакты — на странице сайта.');
+
+        // Хвост-заглушка по умолчанию пуст: одинаковая фраза на всех страницах
+        // делает описания почти дубликатами, то есть не решает исходную задачу.
+        $tail = $this->template('tpl_description_tail', '');
+        if ($tail !== '' && $this->overlaps($tail, $label . ' ' . $section)) {
+            $tail = '';
+        }
 
         $value = $this->render($this->template('tpl_description', '{label}{ — раздел «section»}{ на сайте brand}. {tail}'), [
             'label' => $label,
@@ -183,20 +335,322 @@ class SuggestionEngine
         $len = $this->len($value);
         $short = $len < self::DESCRIPTION_MIN;
 
-        // Описание намеренно не добивается «водой»: пустая фраза ради длины
-        // вредит сниппету сильнее, чем короткий, но осмысленный текст.
+        // Описание намеренно не добивается «водой»: одинаковая фраза ради
+        // длины вредит сниппету сильнее, чем короткий, но точный текст.
         $explanation = 'Описание собрано из заголовка страницы'
             . ($section !== '' ? ', её раздела' : '')
             . ' и названия сайта, длина ' . $len . ' симв.'
             . ($short
-                ? ' Это короче нормы 120–160: допишите одно предложение о содержании страницы.'
+                ? ' Короче нормы 120–160: страница сейчас недоступна для чтения, поэтому взять текст с неё не удалось — допишите предложение о её содержании.'
                 : ' Длина в норме (120–160).');
 
         return [
             'value' => $value,
             'explanation' => $explanation,
-            'confidence' => $short ? 55 : 75,
+            'confidence' => $short ? 45 : 70,
         ];
+    }
+
+    /**
+     * Развёрнутый текст о странице, известный из отчётов: длинный title
+     * или H1, который заметно содержательнее короткого названия.
+     */
+    private function richTextFromFacts(array $issue, string $label): string
+    {
+        $url = trim((string)($issue['SOURCE_URL'] ?? ''));
+        if ($url === '' || !class_exists(PageFacts::class)) {
+            return '';
+        }
+        try {
+            $facts = PageFacts::get($this->siteId, $url);
+        } catch (\Throwable $e) {
+            return '';
+        }
+
+        foreach (['title', 'h1'] as $key) {
+            $text = $this->cleanText((string)($facts[$key] ?? ''));
+            if ($text === '' || PageFacts::isServiceStub($text)) {
+                continue;
+            }
+            if ($this->len($text) < 60 || $this->norm($text) === $this->norm($label)) {
+                continue;
+            }
+            return $this->normalizePrepositions($this->stripBrand($text));
+        }
+        return '';
+    }
+
+    /**
+     * Типовая формулировка для страницы понятного назначения.
+     *
+     * Фразы описывают, зачем страница нужна, и не утверждают фактов о её
+     * содержимом, которые модуль не может проверить.
+     *
+     * @return string Пустая строка, если назначение страницы не распознано.
+     */
+    private function descriptionPattern(string $label, array $issue): string
+    {
+        $haystack = $this->norm($label . ' ' . (string)parse_url((string)($issue['SOURCE_URL'] ?? ''), PHP_URL_PATH));
+        if ($haystack === '') {
+            return '';
+        }
+
+        // Формат: [что ищем, основная фраза, запасная фраза без повторов,
+        //          безопасное дополнение для длины].
+        // %1$s — название страницы, %2$s — название сайта.
+        $patterns = [
+            [
+                'контакт|contacts',
+                '%1$s %2$s: как связаться с компанией и где нас найти.',
+                '%1$s %2$s: телефоны, адреса и часы работы.',
+                'Все способы связи собраны на одной странице.',
+            ],
+            [
+                'доставк|delivery',
+                '%1$s в %2$s: доступные способы получения заказа, сроки и условия.',
+                '%1$s в %2$s: как получить заказ, сколько это займёт и сколько стоит.',
+                'Выберите подходящий вариант при оформлении.',
+            ],
+            [
+                'оплат|payment|how to buy|оформление заказа',
+                '%1$s в %2$s: доступные способы оплаты и порядок оформления.',
+                '%1$s в %2$s: чем можно рассчитаться и что происходит после подтверждения.',
+                'Все варианты перечислены на странице.',
+            ],
+            [
+                'возврат|refund|обмен',
+                '%1$s в %2$s: сроки, необходимые документы и порядок обращения.',
+                '%1$s в %2$s: что делать, если товар не подошёл.',
+                'Здесь описан весь порядок действий.',
+            ],
+            [
+                'реквизит|requisites',
+                '%1$s %2$s для оформления договоров и платёжных документов.',
+                'Юридические и банковские данные %2$s для документов и платежей.',
+                'Сверяйте данные перед отправкой платежа.',
+            ],
+            [
+                'прайс|pricelist',
+                '%1$s %2$s: цены и условия покупки.',
+                'Цены %2$s одним списком: %1$s.',
+                'Уточняйте актуальность перед заказом.',
+            ],
+            [
+                'акци|sales|скидк|распродаж',
+                '%1$s и специальные предложения %2$s: действующие скидки и условия участия.',
+                'Выгодные предложения %2$s: что сейчас продаётся дешевле и на каких условиях.',
+                'Список обновляется по мере появления новых предложений.',
+            ],
+            [
+                'корзин|basket|cart',
+                '%1$s %2$s: проверьте выбранные товары и количество перед оформлением.',
+                'Выбранные товары %2$s: проверьте состав и переходите к оформлению.',
+                'Изменить состав можно до подтверждения заказа.',
+            ],
+            [
+                'услови|usloviya|оферт|договор|правил',
+                '%1$s в %2$s: правила, права сторон и порядок оформления.',
+                'Правила работы %2$s: что важно знать покупателю до заказа.',
+                'Документ действует для всех заказов.',
+            ],
+            [
+                'каталог|catalog',
+                '%1$s %2$s: подбор и покупка товаров с доставкой.',
+                'Ассортимент %2$s: выбирайте по разделам и оформляйте заказ онлайн.',
+                'Разделы помогут быстрее найти нужное.',
+            ],
+            [
+                'блог|blog|новост|news|стать',
+                '%1$s %2$s: статьи, новости и обзоры по теме.',
+                'Публикации %2$s: полезные материалы и новости компании.',
+                'Новые материалы выходят регулярно.',
+            ],
+            [
+                'о компании|about|о нас',
+                '%1$s %2$s: чем занимается компания и как она работает.',
+                'Коротко о %2$s: направления работы и подход к делу.',
+                'Здесь же — контакты и реквизиты.',
+            ],
+            [
+                'вопрос|faq|помощ|справк',
+                '%1$s %2$s: ответы на частые вопросы покупателей.',
+                'Помощь покупателям %2$s: разбор типовых ситуаций.',
+                'Не нашли ответ — напишите нам.',
+            ],
+            [
+                'издательств|publisher',
+                '%1$s %2$s: издательства и их книги в одном разделе.',
+                'Книги по издательствам в %2$s: выбирайте нужное издание.',
+                'Список пополняется новыми поступлениями.',
+            ],
+            [
+                'информац|^info$|/info',
+                '%1$s для покупателей %2$s: оплата, доставка, возврат и другие важные разделы.',
+                'Полезные разделы %2$s: всё, что нужно знать до и после заказа.',
+                'Выберите нужный раздел из списка.',
+            ],
+        ];
+
+        $labelClean = rtrim($label, ' .');
+
+        foreach ($patterns as $pattern) {
+            if (!preg_match('~(' . $pattern[0] . ')~u', $haystack)) {
+                continue;
+            }
+
+            $main = trim(sprintf($pattern[1], $labelClean, $this->brand));
+            // Если основная фраза повторяет слова заголовка, берём запасную:
+            // «Реквизиты компании: … реквизиты компании» читается как брак.
+            if ($this->repeatsWithin($main)) {
+                $alt = trim(sprintf($pattern[2], $labelClean, $this->brand));
+                if (!$this->repeatsWithin($alt)) {
+                    $main = $alt;
+                }
+            }
+
+            if ($this->len($main) < self::DESCRIPTION_MIN && $pattern[3] !== '') {
+                $extra = trim($pattern[3]);
+                if (!$this->overlaps($extra, $main)) {
+                    $main = rtrim($main, ' .') . '. ' . $extra;
+                }
+            }
+
+            return $main;
+        }
+        return '';
+    }
+
+    /**
+     * Есть ли в одной фразе повтор одного и того же слова.
+     */
+    private function repeatsWithin(string $value): bool
+    {
+        $text = function_exists('mb_strtolower') ? mb_strtolower($value, 'UTF-8') : strtolower($value);
+        $words = preg_split('~[^\p{L}]+~u', $text, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        $stems = [];
+        foreach ($words as $word) {
+            if ((function_exists('mb_strlen') ? mb_strlen($word, 'UTF-8') : strlen($word)) < 5) {
+                continue;
+            }
+            $stem = function_exists('mb_substr') ? mb_substr($word, 0, 6, 'UTF-8') : substr($word, 0, 6);
+            if (isset($stems[$stem])) {
+                return true;
+            }
+            $stems[$stem] = true;
+        }
+        return false;
+    }
+
+    /**
+     * Собирает описание из текста страницы, обрезая по границе предложения.
+     */
+    private function descriptionFromContent(string $label, string $content): string
+    {
+        $content = $this->normalizePrepositions($content);
+        $value = $this->trimToSentence($content, self::DESCRIPTION_MAX);
+
+        // Если заголовок не звучит в тексте, ставим его в начало — так сниппет
+        // сразу отвечает на вопрос «что это за страница».
+        if ($label !== '' && !$this->overlaps($label, $value)) {
+            $prefix = rtrim($label, ' .') . '. ';
+            $value = $prefix . $this->trimToSentence($content, self::DESCRIPTION_MAX - $this->len($prefix));
+        }
+
+        if ($this->len($value) < 40) {
+            return '';
+        }
+        // Описание — законченная мысль, поэтому завершаем его точкой.
+        return preg_match('~[.!?…]$~u', $value) ? $value : $value . '.';
+    }
+
+    /**
+     * Набирает текст целыми предложениями, пока помещается в лимит.
+     *
+     * Если после целых предложений остаётся заметный запас, добавляет начало
+     * следующего, обрезанное по запятой и очищенное от повисших слов, — так
+     * описание получается и длинным, и законченным по смыслу.
+     */
+    private function trimToSentence(string $value, int $max): string
+    {
+        $value = trim((string)preg_replace('~\s+~u', ' ', $value));
+        if ($max < 20) {
+            return '';
+        }
+        if ($this->len($value) <= $max) {
+            return $value;
+        }
+
+        $sentences = preg_split('~(?<=[.!?…])\s+~u', $value, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        $result = '';
+        $rest = [];
+
+        foreach ($sentences as $index => $sentence) {
+            $candidate = $result === '' ? $sentence : $result . ' ' . $sentence;
+            if ($this->len($candidate) <= $max) {
+                $result = $candidate;
+                continue;
+            }
+            $rest = array_slice($sentences, $index);
+            break;
+        }
+
+        // Целые предложения не набрали нужной длины — дотягиваем клаузой.
+        if ($rest && $this->len($result) < self::DESCRIPTION_MIN) {
+            $budget = $max - $this->len($result) - 2;
+            if ($budget >= 35) {
+                $piece = $this->dropDanglingWord($this->trimToClause((string)$rest[0], $budget));
+                if ($this->len($piece) >= 30) {
+                    $result = ($result !== '' ? rtrim($result, ' ') . ' ' : '') . $piece;
+                }
+            }
+        }
+
+        if ($result !== '') {
+            return trim($result);
+        }
+
+        // Даже первое предложение не помещается — режем его по клаузе.
+        return $this->dropDanglingWord($this->trimToClause($value, $max));
+    }
+
+    /**
+     * Пересекаются ли тексты по значимым словам. Нужно, чтобы не получалось
+     * «раздел «Информация» … Актуальная информация».
+     */
+    private function overlaps(string $a, string $b): bool
+    {
+        $stems = static function (string $text): array {
+            $text = function_exists('mb_strtolower') ? mb_strtolower($text, 'UTF-8') : strtolower($text);
+            $words = preg_split('~[^\p{L}]+~u', $text, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+            $out = [];
+            foreach ($words as $word) {
+                if ((function_exists('mb_strlen') ? mb_strlen($word, 'UTF-8') : strlen($word)) < 5) {
+                    continue;
+                }
+                $out[] = function_exists('mb_substr') ? mb_substr($word, 0, 6, 'UTF-8') : substr($word, 0, 6);
+            }
+            return array_unique($out);
+        };
+
+        $left = $stems($a);
+        if (!$left) {
+            return false;
+        }
+        return (bool)array_intersect($left, $stems($b));
+    }
+
+    /**
+     * Убирает подряд идущие предлоги — типовая опечатка в текстах сайтов
+     * («условия продажи товаров в для физических лиц»).
+     */
+    private function normalizePrepositions(string $value): string
+    {
+        $prepositions = 'в|во|на|за|для|из|от|до|по|к|ко|с|со|о|об|при|над|под|про|у';
+        return (string)preg_replace(
+            '~\b(?:' . $prepositions . ')\s+(?=(?:' . $prepositions . ')\s)~ui',
+            '',
+            $value
+        );
     }
 
     private function suggestH1(array $issue, array $live, array $target): array
@@ -213,7 +667,8 @@ class SuggestionEngine
                 $label = $label . ': ' . $this->lcfirst($section);
             }
         }
-        $value = $this->fitLength($label, 70);
+        // Обрезаем по смысловой границе, иначе H1 обрывается на предлоге.
+        $value = $this->trimToClause($label, 70);
         return [
             'value' => $value,
             'explanation' => 'Заголовок H1 предложен по названию страницы, длина ' . $this->len($value) . ' симв.',
@@ -336,7 +791,7 @@ class SuggestionEngine
         $candidates[] = $this->pathHint($issue);
 
         foreach ($candidates as $candidate) {
-            $clean = $this->cleanText((string)$candidate);
+            $clean = $this->normalizePrepositions($this->cleanText((string)$candidate));
             if ($clean === '' || $this->isStub($clean)) {
                 continue;
             }
