@@ -164,8 +164,12 @@ echo AdminHelper::hint('Базовый режим безопасный: посл
     <tr>
         <th>Шаблон description</th>
         <td>
-            <input class="sf-input" style="width:100%;max-width:560px" type="text" name="tpl_description" value="<?= AdminHelper::e($tplDescription); ?>" placeholder="{label}{ — section}{ на сайте brand}. {tail}">
-            <small>По умолчанию модуль собирает описание из заголовка страницы, её раздела и названия сайта, добиваясь длины 120–160 символов.</small>
+            <input class="sf-input" style="width:100%;max-width:560px" type="text" name="tpl_description" value="<?= AdminHelper::e($tplDescription); ?>" placeholder="{label}{ — раздел «section»}. {tail}">
+            <small>
+                <b>Название сайта в шаблон подставлять не нужно</b> — модуль добавляет его отдельным предложением в конце.
+                Так сделано намеренно: внутри фразы его пришлось бы склонять («в интернет-магазине RELOD»,
+                а не «в Интернет-магазин RELOD»), а падеж произвольного названия автоматически не определить.
+            </small>
         </td>
     </tr>
     <tr>
