@@ -29,15 +29,22 @@ class SiteContext
         $sites = [];
         $connection = Application::getConnection();
 
-        $res = $connection->query("SELECT LID, NAME, DIR, SERVER_NAME, SITE_NAME, DOC_ROOT FROM b_lang WHERE ACTIVE='Y' ORDER BY SORT ASC, LID ASC");
+        try {
+            $res = $connection->query("SELECT LID, NAME, DIR, SERVER_NAME, SITE_NAME, DOC_ROOT FROM b_lang WHERE ACTIVE='Y' ORDER BY SORT ASC, LID ASC");
+        } catch (\Throwable $e) {
+            // Запасной вариант с минимальным набором колонок: список сайтов
+            // нужен модулю всегда, без него не работает вообще ничего.
+            $res = $connection->query("SELECT LID, NAME, DIR, SERVER_NAME FROM b_lang WHERE ACTIVE='Y' ORDER BY LID ASC");
+        }
+
         while ($row = $res->fetch()) {
             $id = (string)$row['LID'];
             $sites[$id] = [
                 'id' => $id,
-                'name' => (string)($row['SITE_NAME'] ?: $row['NAME']),
-                'dir' => (string)$row['DIR'],
-                'server_name' => self::normalizeDomain((string)$row['SERVER_NAME']),
-                'doc_root' => (string)$row['DOC_ROOT'],
+                'name' => (string)(($row['SITE_NAME'] ?? '') ?: ($row['NAME'] ?? '')),
+                'dir' => (string)($row['DIR'] ?? '/'),
+                'server_name' => self::normalizeDomain((string)($row['SERVER_NAME'] ?? '')),
+                'doc_root' => (string)($row['DOC_ROOT'] ?? ''),
                 'domains' => [],
             ];
             if ($sites[$id]['server_name'] !== '') {

@@ -383,7 +383,7 @@ class ImportService
      */
     public function enrich(array $filter, int $limit = 100, bool $useLive = true): array
     {
-        $stats = ['processed' => 0, 'targeted' => 0, 'suggested' => 0, 'resolved' => 0];
+        $stats = ['processed' => 0, 'targeted' => 0, 'suggested' => 0, 'resolved' => 0, 'failed' => 0];
 
         $rows = IssueTable::getList([
             'filter' => $filter,
@@ -397,6 +397,7 @@ class ImportService
 
         while ($issue = $rows->fetch()) {
             $stats['processed']++;
+            try {
             $siteId = (string)(($issue['SITE_ID'] ?? '') ?: SiteContext::defaultSiteId());
             $update = ['UPDATED_AT' => $now];
 
@@ -436,6 +437,19 @@ class ImportService
             }
 
             IssueTable::update((int)$issue['ID'], $update);
+            } catch (\Throwable $e) {
+                // Одна проблемная страница не должна ронять разбор всего отчёта.
+                $stats['failed']++;
+                ErrorLogTable::add([
+                    'IMPORT_ID' => (int)$issue['IMPORT_ID'],
+                    'ISSUE_ID' => (int)$issue['ID'],
+                    'SITE_ID' => (string)($issue['SITE_ID'] ?? ''),
+                    'LEVEL' => 'error',
+                    'MESSAGE_TEXT' => 'Не удалось подготовить решение для этой карточки: ' . $e->getMessage(),
+                    'CONTEXT_JSON' => json_encode(['url' => $issue['SOURCE_URL'] ?? ''], JSON_UNESCAPED_UNICODE),
+                    'CREATED_AT' => $now,
+                ]);
+            }
         }
 
         return $stats;

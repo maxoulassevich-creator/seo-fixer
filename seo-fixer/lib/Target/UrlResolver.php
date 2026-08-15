@@ -333,12 +333,12 @@ class UrlResolver
             'type' => self::TARGET_ELEMENT,
             'iblock_id' => $iblockId,
             'entity_id' => (int)$element['ID'],
-            'name' => (string)$element['NAME'],
+            'name' => (string)($element['NAME'] ?? ''),
             'path' => $path,
             'file' => '',
             'admin_url' => '/bitrix/admin/iblock_element_edit.php?IBLOCK_ID=' . $iblockId . '&type=' . urlencode($this->iblockTypeById($iblockId)) . '&ID=' . (int)$element['ID'] . '&lang=ru',
             'confidence' => $confidence,
-            'note' => 'Элемент инфоблока «' . $element['NAME'] . '» (#' . (int)$element['ID'] . ')',
+            'note' => 'Элемент инфоблока «' . (string)($element['NAME'] ?? '') . '» (#' . (int)$element['ID'] . ')',
         ];
     }
 
@@ -348,12 +348,12 @@ class UrlResolver
             'type' => self::TARGET_SECTION,
             'iblock_id' => $iblockId,
             'entity_id' => (int)$section['ID'],
-            'name' => (string)$section['NAME'],
+            'name' => (string)($section['NAME'] ?? ''),
             'path' => $path,
             'file' => '',
             'admin_url' => '/bitrix/admin/iblock_section_edit.php?IBLOCK_ID=' . $iblockId . '&type=' . urlencode($this->iblockTypeById($iblockId)) . '&ID=' . (int)$section['ID'] . '&lang=ru',
             'confidence' => $confidence,
-            'note' => 'Раздел инфоблока «' . $section['NAME'] . '» (#' . (int)$section['ID'] . ')',
+            'note' => 'Раздел инфоблока «' . (string)($section['NAME'] ?? '') . '» (#' . (int)$section['ID'] . ')',
         ];
     }
 
@@ -373,7 +373,23 @@ class UrlResolver
         $helper = $connection->getSqlHelper();
         $site = $helper->forSql($siteId);
 
-        $sql = "SELECT i.ID, i.IBLOCK_TYPE_ID, i.CODE, i.EXTERNAL_ID, i.DETAIL_PAGE_URL, i.SECTION_PAGE_URL, i.LIST_PAGE_URL, l.DIR AS SITE_DIR
+        // Набор колонок b_iblock отличается между версиями Битрикса, поэтому
+        // выбираем только те, что реально есть. Внешний код инфоблока в API
+        // называется EXTERNAL_ID, а в таблице лежит в колонке XML_ID.
+        $columns = $this->tableColumns('b_iblock');
+        $select = ['i.ID', 'i.IBLOCK_TYPE_ID'];
+        foreach (['CODE', 'DETAIL_PAGE_URL', 'SECTION_PAGE_URL', 'LIST_PAGE_URL'] as $column) {
+            if (isset($columns[$column])) {
+                $select[] = 'i.' . $column;
+            }
+        }
+        if (isset($columns['XML_ID'])) {
+            $select[] = 'i.XML_ID AS EXTERNAL_ID';
+        } elseif (isset($columns['EXTERNAL_ID'])) {
+            $select[] = 'i.EXTERNAL_ID';
+        }
+
+        $sql = 'SELECT ' . implode(', ', $select) . ", l.DIR AS SITE_DIR
                 FROM b_iblock i
                 INNER JOIN b_iblock_site s ON s.IBLOCK_ID = i.ID
                 LEFT JOIN b_lang l ON l.LID = s.SITE_ID
@@ -381,14 +397,53 @@ class UrlResolver
                 ORDER BY i.ID ASC";
 
         $list = [];
-        $res = $connection->query($sql);
-        while ($row = $res->fetch()) {
-            $row['SITE_DIR'] = (string)($row['SITE_DIR'] ?: '/');
-            $list[] = $row;
+        try {
+            $res = $connection->query($sql);
+            while ($row = $res->fetch()) {
+                $list[] = [
+                    'ID' => (int)$row['ID'],
+                    'IBLOCK_TYPE_ID' => (string)($row['IBLOCK_TYPE_ID'] ?? ''),
+                    'CODE' => (string)($row['CODE'] ?? ''),
+                    'EXTERNAL_ID' => (string)($row['EXTERNAL_ID'] ?? ''),
+                    'DETAIL_PAGE_URL' => (string)($row['DETAIL_PAGE_URL'] ?? ''),
+                    'SECTION_PAGE_URL' => (string)($row['SECTION_PAGE_URL'] ?? ''),
+                    'LIST_PAGE_URL' => (string)($row['LIST_PAGE_URL'] ?? ''),
+                    'SITE_DIR' => (string)(($row['SITE_DIR'] ?? '') ?: '/'),
+                ];
+            }
+        } catch (\Throwable $e) {
+            // Без списка инфоблоков модуль просто не определит цель правки —
+            // это не повод ронять разбор отчёта целиком.
+            $list = [];
         }
 
         $this->iblockCache[$siteId] = $list;
         return $list;
+    }
+
+    /**
+     * Реально существующие колонки таблицы.
+     *
+     * @return array<string,bool>
+     */
+    private function tableColumns(string $table): array
+    {
+        static $cache = [];
+        if (isset($cache[$table])) {
+            return $cache[$table];
+        }
+
+        $columns = [];
+        try {
+            $res = Application::getConnection()->query('SHOW COLUMNS FROM ' . $table);
+            while ($row = $res->fetch()) {
+                $columns[(string)$row['Field']] = true;
+            }
+        } catch (\Throwable $e) {
+            $columns = [];
+        }
+
+        return $cache[$table] = $columns;
     }
 
     private function iblockTypeById(int $iblockId): string

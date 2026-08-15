@@ -53,16 +53,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && check_bitrix_sessid()) {
             if ((int)$one['error'] === UPLOAD_ERR_NO_FILE) {
                 continue;
             }
+            $importId = 0;
             try {
                 $importId = $service->importUploadedFile($one, $userId, $comment, $forcedSite);
                 $lastImportId = $importId;
-                if ($autoEnrich) {
-                    $service->enrich(['=IMPORT_ID' => $importId], 300, $useLive);
-                }
-                $results[] = ['name' => (string)$one['name'], 'ok' => true, 'import_id' => $importId, 'text' => 'Загружен и разобран.'];
             } catch (Throwable $e) {
-                $results[] = ['name' => (string)$one['name'], 'ok' => false, 'import_id' => 0, 'text' => $e->getMessage()];
+                $results[] = ['name' => (string)$one['name'], 'ok' => false, 'import_id' => 0, 'text' => 'Файл не разобран: ' . $e->getMessage()];
+                continue;
             }
+
+            // Подготовка решений — отдельный этап. Если она не удалась,
+            // отчёт всё равно загружен, и карточки уже доступны.
+            $note = 'Загружен и разобран.';
+            if ($autoEnrich) {
+                try {
+                    $stats = $service->enrich(['=IMPORT_ID' => $importId], 300, $useLive);
+                    if (!empty($stats['failed'])) {
+                        $note .= ' Решения подготовлены не для всех карточек (' . (int)$stats['failed'] . ' с ошибкой) — подробности в разделе «Не выполнено».';
+                    }
+                } catch (Throwable $e) {
+                    $note .= ' Подготовка решений не удалась: ' . $e->getMessage()
+                        . ' Отчёт загружен — нажмите «Подобрать предложения» на странице проблем.';
+                }
+            }
+            $results[] = ['name' => (string)$one['name'], 'ok' => true, 'import_id' => $importId, 'text' => $note];
         }
 
         if (!$results) {
